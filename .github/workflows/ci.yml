@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Create a release"
+        type: boolean
+        default: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install golangci-lint
+        run: curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - run: make check
+
+  build:
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary: snake-linux-amd64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            binary: snake-windows-amd64.exe
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            binary: snake-darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Download modules
+        run: go mod download
+      - name: Install Linux dependencies
+        if: matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
+      - name: Build
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+          GOFLAGS: -mod=mod
+        run: go build -o ${{ matrix.binary }} ./cmd/snake
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.binary }}
+          path: ${{ matrix.binary }}
+
+  release:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Determine next version
+        id: version
+        run: |
+          latest=$(git tag --sort=-v:refname | grep -E '^v[0-9]+' | head -n1)
+          if [ -z "$latest" ]; then
+            echo "tag=v0.1.0" >> "$GITHUB_OUTPUT"
+          else
+            next=$(echo "$latest" | awk -F. '{print $1"."$2"."$3+1}')
+            echo "tag=$next" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: dist
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          files: dist/**/*
+          generate_release_notes: true
